@@ -201,6 +201,7 @@ class PageRenderer extends WireData implements Module, ConfigurableModule {
 		$b = $this->wire()->modules->InputfieldButton;
 		$b->id = 'do_render_button';
 		$b->value = $this->_('Render all pages');
+		$b->icon = 'cogs';
 		$markup = $b->render();
 		$markup .= <<<EOT
 <script>
