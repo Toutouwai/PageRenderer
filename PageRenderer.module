@@ -1,0 +1,226 @@
+<?php namespace ProcessWire;
+
+/**
+ *
+ * Page Renderer
+ *
+ * @author Robin Sallis
+ *
+ * ProcessWire 3.x
+ * Copyright (C) 2011 by Ryan Cramer
+ * Licensed under GNU/GPL v2, see LICENSE.TXT
+ *
+ * http://www.processwire.com
+ * http://www.ryancramer.com
+ *
+ */
+
+class PageRenderer extends WireData implements Module, ConfigurableModule {
+
+	/**
+	 * Module information
+	 */
+	public static function getModuleInfo() {
+		return array(
+			'title' => 'Page Renderer',
+			'version' => '0.1.0',
+			'summary' => 'Renders pages that have a template file.',
+			'author' => 'Robin Sallis',
+			'href' => 'https://github.com/Toutouwai/PageRenderer',
+			'icon' => 'cogs',
+			'requires' => 'ProcessWire>=3.0.0',
+		);
+	}
+
+	/**
+	 * Construct
+	 */
+	public function __construct() {
+		parent::__construct();
+		$this->time_limit = 300;
+	}
+
+	/**
+	 * Render pages with a template file
+	 */
+	protected function renderPages() {
+		set_time_limit($this->time_limit);
+		$t = Debug::timer();
+		$pages = $this->wire()->pages;
+		$templates_with_file = $this->getTemplatesWithFile();
+		$selector = new Selectors("include=hidden, template=" . implode('|', $templates_with_file));
+		// Merge limiting selector if any
+		if($this->pages_selector) $selector->add(new Selectors($this->pages_selector));
+		$start = 0;
+		$limit = 50;
+		do {
+			$results = $pages->find("$selector, start=$start, limit=$limit");
+			$total = $results->getTotal();
+			foreach($results as $p) {
+				// Render page
+				$this->renderPage($p);
+
+				// Pages that allow page numbers
+				if($p->template->allowPageNum) {
+					$template_id = $p->template->id;
+					$pagination_limit = 0;
+					if($this->{"{$template_id}_pagination_type"} === 'fixed' && $this->{"{$template_id}_pagination_number"}) {
+						$pagination_limit = $this->{"{$template_id}_pagination_number"};
+					}
+					elseif($this->{"{$template_id}_pagination_type"} === 'calculate' && $this->{"{$template_id}_pagination_children"}) {
+						$pagination_limit = ceil($p->numChildren(true) / $this->{"{$template_id}_pagination_children"});
+					}
+					for($i = 2; $i <= $pagination_limit; $i++) {
+						$this->wire()->input->setPageNum($i);
+						// Render page
+						$this->renderPage($p);
+					}
+					// Reset page number to default
+					$this->wire()->input->setPageNum(1);
+				}
+			}
+			// Free some memory
+			$pages->uncacheAll();
+			// Advance to next set
+			$start += $limit;
+		} while($total > $start);
+		$time = Debug::timer($t);
+		$this->wire()->message(sprintf($this->_('Rendered %s pages in %s seconds'), $total, $time));
+	}
+
+	/**
+	 * Render a page
+	 * This is hookable in case there is a need to replace it with a custom method, e.g. render some URL segments
+	 *
+	 * @param Page $page
+	 */
+	protected function ___renderPage($page) {
+		@$page->render();
+	}
+
+	/**
+	 * Get the IDs of templates that have a template file
+	 *
+	 * @return array
+	 */
+	protected function getTemplatesWithFile() {
+		$templates_with_file = array();
+		foreach($this->wire()->templates as $template) {
+			if(!$template->flags && $template->filenameExists()) $templates_with_file[] = $template;
+		}
+		return $templates_with_file;
+	}
+
+	/**
+	 * Reset module config value
+	 *
+	 * @param string $key
+	 */
+	protected function resetConfigValue($key) {
+		$module_config = $this->wire()->modules->getModuleConfigData($this);
+		$module_config[$key] = '';
+		$this->wire()->modules->saveModuleConfigData($this, $module_config);
+	}
+
+	/**
+	 * Config inputfields
+	 *
+	 * @param InputfieldWrapper $inputfields
+	 */
+	public function getModuleConfigInputfields($inputfields) {
+
+		if($this->do_render) {
+			$this->resetConfigValue('do_render');
+			$this->renderPages();
+			$this->wire()->session->redirect("./edit?name=$this&collapse_info=1");
+		}
+
+		/* @var InputfieldText $f */
+		$f = $this->wire()->modules->InputfieldText;
+		$f_name = 'pages_selector';
+		$f->name = $f_name;
+		$f->label = $this->_('Selector');
+		$f->description = $this->_('Enter a selector to limit the pages that will be rendered. Leave empty to render all pages with a template file.');
+		$f->value = $this->$f_name;
+		$inputfields->add($f);
+
+		/* @var InputfieldFieldset $fs */
+		$fs = $this->wire()->modules->InputfieldFieldset;
+		$fs->label = $this->_('Templates allowing page numbers');
+		foreach($this->getTemplatesWithFile() as $template) {
+			/* @var Template $template */
+			if(!$template->allowPageNum) continue;
+			/* @var InputfieldRadios $f */
+			$f = $this->wire()->modules->InputfieldRadios;
+			$f_name = "{$template->id}_pagination_type";
+			$f->name = $f_name;
+			$f->label = $template->get('label|name') . $this->_(' template: pagination rendering type');
+			$f->addOption('fixed', $this->_('Fixed number of pages'));
+			$f->addOption('calculate', $this->_('Calculate from children'));
+			$f->value = $this->$f_name ?: 'fixed';
+			$f->optionColumns = 1;
+			$f->columnWidth = 50;
+			$fs->add($f);
+			/* @var InputfieldInteger $f */
+			$f = $this->wire()->modules->InputfieldInteger;
+			$f_name = "{$template->id}_pagination_number";
+			$f->name = $f_name;
+			$f->label = $template->get('label|name') . $this->_(' template: number of pagination pages');
+			$f->inputType = 'number';
+			$f->value = $this->$f_name;
+			$f->columnWidth = 25;
+			$f->showIf = "{$template->id}_pagination_type=fixed";
+			$fs->add($f);
+			/* @var InputfieldInteger $f */
+			$f = $this->wire()->modules->InputfieldInteger;
+			$f_name = "{$template->id}_pagination_children";
+			$f->name = $f_name;
+			$f->label = $template->get('label|name') . $this->_(' template: children per page');
+			$f->inputType = 'number';
+			$f->value = $this->$f_name;
+			$f->columnWidth = 25;
+			$f->showIf = "{$template->id}_pagination_type=calculate";
+			$fs->add($f);
+		}
+		if($fs->children->count) $inputfields->add($fs);
+
+		/* @var InputfieldInteger $f */
+		$f = $this->wire()->modules->InputfieldInteger;
+		$f_name = 'time_limit';
+		$f->name = $f_name;
+		$f->label = $this->_('Time limit for rendering (seconds)');
+		$f->inputType = 'number';
+		$f->value = $this->$f_name;
+		$inputfields->add($f);
+
+		/* @var InputfieldMarkup $f */
+		$f = $this->wire()->modules->InputfieldMarkup;
+		$f->label = 'Render all pages';
+		$f->skipLabel = Inputfield::skipLabelHeader;
+		/* @var InputfieldButton $f */
+		$b = $this->wire()->modules->InputfieldButton;
+		$b->id = 'do_render_button';
+		$b->value = $this->_('Render all pages');
+		$markup = $b->render();
+		$markup .= <<<EOT
+<script>
+$(function() {
+	$('#do_render_button').click(function() {
+		$('#do_render').val(1);
+		$('#Inputfield_submit_save_module').trigger('click');
+	});
+});
+</script>
+EOT;
+		$f->value = $markup;
+		$inputfields->add($f);
+
+		/* @var InputfieldHidden $f */
+		$f = $this->wire()->modules->InputfieldHidden;
+		$f->id = 'do_render';
+		$f->name = 'do_render';
+		$inputfields->add($f);
+
+	}
+
+}
